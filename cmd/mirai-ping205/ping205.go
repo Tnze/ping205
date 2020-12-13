@@ -1,56 +1,130 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/wangnengjie/mirai-go"
-	"github.com/wangnengjie/mirai-go/model"
+	"log"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"ping205"
 	"strings"
+	"time"
 )
 
 var (
-	host    = flag.String("host", "", "Hostname of mirai-api-http")
+	host    = flag.String("host", "127.0.0.1:8080", "Hostname of mirai-api-http")
 	authKey = flag.String("authkey", "", "Auth Key")
 	Id      = flag.Int64("qq", 0, "QQ number")
-	Debug   = flag.Bool("debug", false, "Debug")
 	GroupID = flag.Int64("groupid", 0, "Group ID")
 )
 
 func main() {
 	flag.Parse()
-	bot := mirai.NewBot(mirai.BotConfig{
-		Host:      *host,
-		AuthKey:   *authKey,
-		Id:        model.QQId(*Id),
-		Websocket: false,
-		RecvMode:  mirai.RecvAll,
-		Debug:     *Debug,
-	})
-	err := bot.Connect()
+	session, err := GetSession()
 	if err != nil {
-		bot.Log.Error(err)
+		log.Fatalf("Get session key error: %v", session)
 	}
-	bot.On(model.GroupMessage, repeat)
-	bot.Loop()
+	if err := BindQQ(session, *Id); err != nil {
+		log.Fatalf("Bind QQ error: %v", err)
+	}
+	time.Sleep(time.Second * 10)
+	if _, err := SendGroupMsg(session, "hello!"); err != nil {
+		log.Fatalf("Send message error: %v", err)
+	}
+
+	OnGroupMsg()
 }
 
-func repeat(ctx *mirai.Context) {
-	m, _ := ctx.Message.(*model.GroupMsg)
-	if len(m.MessageChain) < 2 {
-		fmt.Printf("%v\n", m.MessageChain[1].(*model.Plain).Text)
-		return
-	} else if msg, ok := m.MessageChain[1].(*model.Plain); !ok {
-		return
-	} else if !strings.HasPrefix(msg.Text, "ping205") {
-		return
+func GetSession() (string, error) {
+	var c http.Client
+	link := url.URL{
+		Host: *host, Scheme: "http", Path: "auth",
 	}
+	var resp struct {
+		Code    int    `json:"code"`
+		Session string `json:"session"`
+	}
+	if respJson, err := c.Post(
+		link.String(), "application/json",
+		strings.NewReader(`{"authKey":"`+*authKey+`"}`)); err != nil {
+		return "", fmt.Errorf("auth error: %w", err)
+	} else if err := json.NewDecoder(respJson.Body).Decode(&resp); err != nil {
+		return "", fmt.Errorf("decode auth response error: %w", err)
+	} else if resp.Code != 0 {
+		return "", fmt.Errorf("decode auth response status error: %d", resp.Code)
+	}
+	return resp.Session, nil
+}
 
-	if m.Sender.Group.Id != model.GroupId(*GroupID) {
-		return
+func BindQQ(session string, qq int64) error {
+	var c http.Client
+	link := url.URL{
+		Host: *host, Scheme: "http", Path: "verify",
 	}
+	var resp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if respJson, err := c.Post(
+		link.String(), "application/json",
+		strings.NewReader(fmt.Sprintf(`{"sessionKey": %q,"qq": %d}`, session, qq))); err != nil {
+		return fmt.Errorf("verify error: %w", err)
+	} else if err := json.NewDecoder(respJson.Body).Decode(&resp); err != nil {
+		return fmt.Errorf("decode verify response error: %w", err)
+	} else if resp.Code != 0 {
+		return fmt.Errorf("verify error: [%d]%s", resp.Code, resp.Msg)
+	}
+	log.Printf("Verify success: [%d]%s", resp.Code, resp.Msg)
+	return nil
+}
+
+func SendGroupMsg(session, msg string) (int, error) {
+	c := http.Client{}
+	var resp struct {
+		Code  int    `json:"code"`
+		Msg   string `json:"msg"`
+		MsgID int    `json:"messageId"`
+	}
+	link := url.URL{
+		Host: *host, Scheme: "http", Path: "sendFriendMessage",
+	}
+	var paylod = struct {
+		SessionKey   string `json:"sessionKey"`
+		Target       int64  `json:"target"`
+		MessageChain []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"messageChain"`
+	}{
+		SessionKey: session,
+		Target:     *GroupID,
+		MessageChain: []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}{
+			{Type: "Plain", Text: msg},
+		},
+	}
+	if pl, err := json.Marshal(paylod); err != nil {
+		return 0, fmt.Errorf("marshal payload error: %w", err)
+	} else if respJson, err := c.Post(
+		link.String(), "application/json",
+		bytes.NewReader(pl)); err != nil {
+		return 0, fmt.Errorf("verify error: %w", err)
+	} else if err := json.NewDecoder(respJson.Body).Decode(&resp); err != nil {
+		return 0, fmt.Errorf("decode verify response error: %w", err)
+	} else if resp.Code != 0 {
+		log.Printf("Json payload: %s", pl)
+		return 0, fmt.Errorf("send group message error: [%d]%s", resp.Code, resp.Msg)
+	}
+	return resp.MsgID, nil
+}
+
+func OnGroupMsg() {
 	// read arp table
 	ips, err := ping205.GetArpTable()
 	if err != nil {
@@ -66,16 +140,6 @@ func repeat(ctx *mirai.Context) {
 			names = append(names, strings.Join(names, "|"))
 		}
 	}
-	// 0 代表不回复消息，msgId是发出的消息的id
-	// chain中第一位为source
-	msgId, err := ctx.Bot.SendGroupMessage(m.Sender.Group.Id,
-		model.MsgChain{
-			&model.Plain{Text: strings.Join(names, "\n")},
-		}, 0)
-	// msgId 是刚刚发送的这条消息的id
-	if err != nil {
-		ctx.Bot.Log.Error(err)
-	} else {
-		ctx.Bot.Log.Info(msgId)
-	}
+	msg := strings.Join(names, "\n")
+	log.Println(msg)
 }
