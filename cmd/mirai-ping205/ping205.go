@@ -12,7 +12,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"ping205"
 	"strings"
 	"sync"
@@ -20,14 +19,14 @@ import (
 )
 
 var (
-	useNmap    = flag.Bool("usenmap", false, "Use nmap instead of read arp table")
-	scanTarget = flag.String("scan", "", "")
-	host       = flag.String("host", "127.0.0.1:8080", "Hostname of mirai-api-http")
-	report     = flag.String("report", "127.0.0.1:12031", "Report destinations (where this program listen)")
-	authKey    = flag.String("authkey", "", "Auth Key")
-	Id         = flag.Int64("qq", 0, "QQ number")
-	GroupID    = flag.Int64("groupid", 0, "Group ID")
-	DebugMode  = flag.Bool("debug", false, "Debug mode")
+	nmapAddr    = flag.String("nmapAddr", "", "Address using in nmap, left empty for read arp table")
+	nmapTimeout = flag.Int("nmapTimeout", 10_000, "Timeout for nmap scanning, (ms)")
+	host        = flag.String("host", "127.0.0.1:8080", "Hostname of mirai-api-http")
+	report      = flag.String("report", "127.0.0.1:12031", "Report destinations (where this program listen)")
+	authKey     = flag.String("authkey", "", "Auth Key")
+	Id          = flag.Int64("qq", 0, "QQ number")
+	GroupID     = flag.Int64("groupid", 0, "Group ID")
+	DebugMode   = flag.Bool("debug", false, "Debug mode")
 )
 var c = &http.Client{}
 
@@ -183,28 +182,17 @@ func SendGroupMsg(session, msg string) (int, error) {
 }
 
 func OnGroupMsg() {
-	// get ip list
-	var ips []net.IP
-	var err error
-	if *useNmap {
-		ips, err = ping205.NmapScan(*scanTarget, *timeout)
-	} else {
-		ips, err = ping205.GetArpTable()
-	}
-	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "Get ip list error: %v\n", err)
-		os.Exit(-1)
-	}
-
 	session, err := GetSession()
 	if err != nil {
 		log.Printf("Get session key error: %v", err)
 		return
 	}
+
 	if err := BindQQ(session, *Id); err != nil {
 		log.Printf("Bind QQ error: %v", err)
 		return
 	}
+
 	sendMsg := func(msg string) error {
 		if msgID, err := SendGroupMsg(session, msg); err != nil {
 			return err
@@ -214,31 +202,38 @@ func OnGroupMsg() {
 		return nil
 	}
 	send := func(ips []net.IP) {
-		var sb strings.Builder
-		for _, ip := range ips {
-			sb.WriteString(" - ")
-			names, err := net.LookupAddr(ip.String())
-			if err != nil {
-				sb.WriteString(ip.String() + "\n")
-			} else {
-				sb.WriteString(strings.Join(names, "|") + "\n")
-			}
-		}
-		if err := sendMsg(strings.TrimSuffix(sb.String(), "\n")); err != nil {
-			log.Printf("Cannot send message: %v", err)
+		str := ping205.IpsString(ips)
+		if err := sendMsg(str); err != nil {
+			log.Printf("Cannot send message: [%s]%v", str, err)
 		}
 	}
+
+	// get ip list
+	var ips []net.IP
+	if *nmapAddr != "" {
+		ips, err = ping205.NmapScan(*nmapAddr, time.Millisecond*time.Duration(*nmapTimeout))
+	} else {
+		ips, err = ping205.GetArpTable()
+	}
+	if err != nil {
+		str := fmt.Sprintf("Get ip list error: %v\n", err)
+		if err := sendMsg(str); err != nil {
+			log.Printf("Cannot send message: [%s]%v", str, err)
+		}
+	}
+
 	pinger := fastping.NewPinger()
-	pinger.MaxRTT = time.Second * 30
+	pinger.MaxRTT = time.Second * 10
 	for i := range ips {
 		pinger.AddIPAddr(&net.IPAddr{IP: ips[i]})
 	}
+
 	aliveIps := make([]net.IP, 0, len(ips))
 	var mutAlv sync.Mutex
 	ctx, cancel := context.WithCancel(context.TODO())
 	finish := make(chan struct{})
 	go func(ctx context.Context) {
-		ticker := time.NewTicker(time.Second * 3)
+		ticker := time.NewTicker(time.Second)
 		for {
 			select {
 			case <-ticker.C:
@@ -255,21 +250,27 @@ func OnGroupMsg() {
 			}
 		}
 	}(ctx)
+
 	pinger.OnRecv = func(addr *net.IPAddr, rtt time.Duration) {
 		mutAlv.Lock()
 		aliveIps = append(aliveIps, addr.IP)
 		mutAlv.Unlock()
 	}
+
 	if err := pinger.Run(); err != nil {
-		if err := sendMsg(fmt.Sprintf("Ping error: %v", err)); err != nil {
-			log.Printf("Cannot send message: %v", err)
+		str := fmt.Sprintf("Ping error: %v", err)
+		if err := sendMsg(str); err != nil {
+			log.Printf("Cannot send message: [%s]%v", str, err)
 		}
 	}
+
 	cancel()
 	<-finish
+
 	if len(aliveIps) > 0 {
 		send(aliveIps)
 	}
+
 	if *DebugMode {
 		log.Printf("Ping finished")
 	}
