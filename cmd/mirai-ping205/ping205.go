@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/robfig/cron/v3"
 	"github.com/tatsushid/go-fastping"
-	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
@@ -32,41 +32,59 @@ var c = &http.Client{}
 
 func main() {
 	flag.Parse()
-	http.HandleFunc("/dhcp", func(rw http.ResponseWriter, r *http.Request) {
-		list, err := ioutil.ReadAll(r.Body)
-		if err != nil {
-			log.Printf("Received DHCP list error: %v", err)
-		}
-		log.Printf("Received DHCP list: %s", list)
-	})
-	http.HandleFunc("/post", func(rw http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Type         string `json:"type"`
-			MessageChain []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"messageChain"`
-			Sender struct {
-				ID         int64  `json:"id"`
-				MemberName string `json:"memberName"`
-				Group      struct {
-					ID   int64  `json:"id"`
-					Name string `json:"name"`
-				} `json:"group"`
-			} `json:"sender"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			log.Printf("Decode request error: %v", err)
-		}
-		if req.Sender.Group.ID == *GroupID &&
-			len(req.MessageChain) > 1 &&
-			req.MessageChain[1].Type == "Plain" &&
-			req.MessageChain[1].Text == "ping205" {
-			go OnGroupMsg()
-		}
-	})
+
+	UpdateNmapList()
+	c := cron.New()
+	c.AddFunc("* * * * *", UpdateNmapList)
+	c.Start()
+
+	http.HandleFunc("/post", HandleMirai)
 	if err := http.ListenAndServe(*report, nil); err != nil {
 		log.Fatalf("Listen error: %v", err)
+	}
+}
+
+var nmapCache struct {
+	ips []net.IP
+	sync.Mutex
+}
+
+func UpdateNmapList() {
+	ips, err := ping205.NmapScan(*nmapAddr, time.Millisecond*time.Duration(*nmapTimeout))
+	if err != nil {
+		log.Printf("Run nmap error: %v", err)
+		return
+	}
+
+	nmapCache.Lock()
+	nmapCache.ips = ips
+	nmapCache.Unlock()
+}
+
+func HandleMirai(rw http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Type         string `json:"type"`
+		MessageChain []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"messageChain"`
+		Sender struct {
+			ID         int64  `json:"id"`
+			MemberName string `json:"memberName"`
+			Group      struct {
+				ID   int64  `json:"id"`
+				Name string `json:"name"`
+			} `json:"group"`
+		} `json:"sender"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Printf("Decode request error: %v", err)
+	}
+	if req.Sender.Group.ID == *GroupID &&
+		len(req.MessageChain) > 1 &&
+		req.MessageChain[1].Type == "Plain" &&
+		req.MessageChain[1].Text == "ping205" {
+		go OnGroupMsg()
 	}
 }
 
@@ -211,11 +229,10 @@ func OnGroupMsg() {
 	// get ip list
 	var ips []net.IP
 	if *nmapAddr != "" {
-		ips, err = ping205.NmapScan(*nmapAddr, time.Millisecond*time.Duration(*nmapTimeout))
-	} else {
-		ips, err = ping205.GetArpTable()
-	}
-	if err != nil {
+		nmapCache.Lock()
+		ips = nmapCache.ips
+		nmapCache.Unlock()
+	} else if ips, err = ping205.GetArpTable(); err != nil {
 		str := fmt.Sprintf("Get ip list error: %v\n", err)
 		if err := sendMsg(str); err != nil {
 			log.Printf("Cannot send message: [%s]%v", str, err)

@@ -14,7 +14,8 @@ func NmapScan(target string, timeout time.Duration) (ips []net.IP, err error) {
 	defer cancel()
 	scanner, err := nmap.NewScanner(
 		nmap.WithTargets(target),
-		nmap.WithPingScan(),
+		//nmap.WithPingScan(),	// or
+		nmap.WithListScan(), // or
 		nmap.WithContext(ctx),
 	)
 	if err != nil {
