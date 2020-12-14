@@ -36,6 +36,7 @@ func GetArpTable() (ips []net.IP, err error) {
 		if flags&0x2 == 0 {
 			continue // skip
 		}
+
 		ips = append(ips, net.ParseIP(string(fields[0])))
 	}
 	return

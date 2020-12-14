@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/tatsushid/go-fastping"
 	"log"
 	"net"
 	"net/http"
@@ -12,6 +14,8 @@ import (
 	"os"
 	"ping205"
 	"strings"
+	"sync"
+	"time"
 )
 
 var (
@@ -50,7 +54,7 @@ func main() {
 			len(req.MessageChain) > 1 &&
 			req.MessageChain[1].Type == "Plain" &&
 			req.MessageChain[1].Text == "ping205" {
-			OnGroupMsg()
+			go OnGroupMsg()
 		}
 	})); err != nil {
 		log.Fatalf("Listen error: %v", err)
@@ -175,28 +179,85 @@ func OnGroupMsg() {
 		_, _ = fmt.Fprintf(os.Stderr, "Get arp table error: %v\n", err)
 		os.Exit(-1)
 	}
-	var sb strings.Builder
-	for _, ip := range ips {
-		names, err := net.LookupAddr(ip.String())
-		if err != nil {
-			sb.WriteString(ip.String() + "\n")
-		} else {
-			sb.WriteString(strings.Join(names, "|") + "\n")
-		}
-	}
 
 	session, err := GetSession()
 	if err != nil {
-		log.Fatalf("Get session key error: %v", session)
+		log.Printf("Get session key error: %v", err)
+		return
 	}
 	if err := BindQQ(session, *Id); err != nil {
-		log.Fatalf("Bind QQ error: %v", err)
+		log.Printf("Bind QQ error: %v", err)
+		return
 	}
-	if msgID, err := SendGroupMsg(session, sb.String()); err != nil {
-		log.Fatalf("Send message error: %v", err)
-	} else if *DebugMode {
-		fmt.Printf("Send message success: %d", msgID)
+	sendMsg := func(msg string) error {
+		if msgID, err := SendGroupMsg(session, msg); err != nil {
+			return err
+		} else if *DebugMode {
+			fmt.Printf("Send message success: %d", msgID)
+		}
+		return nil
 	}
+	send := func(ips []net.IP) {
+		var sb strings.Builder
+		for _, ip := range ips {
+			sb.WriteString(" - ")
+			names, err := net.LookupAddr(ip.String())
+			if err != nil {
+				sb.WriteString(ip.String() + "\n")
+			} else {
+				sb.WriteString(strings.Join(names, "|") + "\n")
+			}
+		}
+		if err := sendMsg(sb.String()); err != nil {
+			log.Printf("Cannot send message: %v", err)
+		}
+	}
+	pinger := fastping.NewPinger()
+	pinger.MaxRTT = time.Second * 30
+	for i := range ips {
+		pinger.AddIPAddr(&net.IPAddr{IP: ips[i]})
+	}
+	aliveIps := make([]net.IP, 0, len(ips))
+	var mutAlv sync.Mutex
+	ctx, cancel := context.WithCancel(context.TODO())
+	isFinished := make(chan struct{})
+	go func(ctx context.Context) {
+		ticker := time.NewTicker(time.Second * 3)
+		for {
+			select {
+			case <-ticker.C:
+				mutAlv.Lock()
+				if len(aliveIps) > 0 {
+					send(aliveIps)
+					aliveIps = aliveIps[:0]
+				}
+				mutAlv.Unlock()
+			case <-ctx.Done():
+				ticker.Stop()
+				isFinished <- struct{}{}
+				return
+			}
+		}
+	}(ctx)
+	pinger.OnRecv = func(addr *net.IPAddr, rtt time.Duration) {
+		mutAlv.Lock()
+		aliveIps = append(aliveIps, addr.IP)
+		mutAlv.Unlock()
+	}
+	if err := pinger.Run(); err != nil {
+		if err := sendMsg(fmt.Sprintf("Ping error: %v", err)); err != nil {
+			log.Printf("Cannot send message: %v", err)
+		}
+	}
+	cancel()
+	<-isFinished
+	if len(aliveIps) > 0 {
+		send(aliveIps)
+	}
+	if *DebugMode {
+		log.Printf("Ping finished")
+	}
+
 	if err := ReleaseSession(session, *Id); err != nil {
 		log.Fatalf("Release session key error: %v", err)
 	}
