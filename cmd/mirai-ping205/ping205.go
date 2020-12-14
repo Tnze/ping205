@@ -20,14 +20,15 @@ import (
 )
 
 var (
-	host      = flag.String("host", "127.0.0.1:8080", "Hostname of mirai-api-http")
-	report    = flag.String("report", "127.0.0.1:12031", "Report destinations (where this program listen)")
-	authKey   = flag.String("authkey", "", "Auth Key")
-	Id        = flag.Int64("qq", 0, "QQ number")
-	GroupID   = flag.Int64("groupid", 0, "Group ID")
-	DebugMode = flag.Bool("debug", false, "Debug mode")
+	useNmap    = flag.Bool("usenmap", false, "Use nmap instead of read arp table")
+	scanTarget = flag.String("scan", "", "")
+	host       = flag.String("host", "127.0.0.1:8080", "Hostname of mirai-api-http")
+	report     = flag.String("report", "127.0.0.1:12031", "Report destinations (where this program listen)")
+	authKey    = flag.String("authkey", "", "Auth Key")
+	Id         = flag.Int64("qq", 0, "QQ number")
+	GroupID    = flag.Int64("groupid", 0, "Group ID")
+	DebugMode  = flag.Bool("debug", false, "Debug mode")
 )
-
 var c = &http.Client{}
 
 func main() {
@@ -182,10 +183,16 @@ func SendGroupMsg(session, msg string) (int, error) {
 }
 
 func OnGroupMsg() {
-	// read arp table
-	ips, err := ping205.GetArpTable()
+	// get ip list
+	var ips []net.IP
+	var err error
+	if *useNmap {
+		ips, err = ping205.NmapScan(*scanTarget, *timeout)
+	} else {
+		ips, err = ping205.GetArpTable()
+	}
 	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "Get arp table error: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "Get ip list error: %v\n", err)
 		os.Exit(-1)
 	}
 
