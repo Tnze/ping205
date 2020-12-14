@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/tatsushid/go-fastping"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
@@ -31,7 +32,14 @@ var c = &http.Client{}
 
 func main() {
 	flag.Parse()
-	if err := http.ListenAndServe(*report, http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/dhcp", func(rw http.ResponseWriter, r *http.Request) {
+		list, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			log.Printf("Received DHCP list error: %v", err)
+		}
+		log.Printf("Received DHCP list: %s", list)
+	})
+	http.HandleFunc("/post", func(rw http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Type         string `json:"type"`
 			MessageChain []struct {
@@ -56,7 +64,8 @@ func main() {
 			req.MessageChain[1].Text == "ping205" {
 			go OnGroupMsg()
 		}
-	})); err != nil {
+	})
+	if err := http.ListenAndServe(*report, nil); err != nil {
 		log.Fatalf("Listen error: %v", err)
 	}
 }
@@ -208,7 +217,7 @@ func OnGroupMsg() {
 				sb.WriteString(strings.Join(names, "|") + "\n")
 			}
 		}
-		if err := sendMsg(sb.String()); err != nil {
+		if err := sendMsg(strings.TrimSuffix(sb.String(), "\n")); err != nil {
 			log.Printf("Cannot send message: %v", err)
 		}
 	}
@@ -220,7 +229,7 @@ func OnGroupMsg() {
 	aliveIps := make([]net.IP, 0, len(ips))
 	var mutAlv sync.Mutex
 	ctx, cancel := context.WithCancel(context.TODO())
-	isFinished := make(chan struct{})
+	finish := make(chan struct{})
 	go func(ctx context.Context) {
 		ticker := time.NewTicker(time.Second * 3)
 		for {
@@ -234,7 +243,7 @@ func OnGroupMsg() {
 				mutAlv.Unlock()
 			case <-ctx.Done():
 				ticker.Stop()
-				isFinished <- struct{}{}
+				finish <- struct{}{}
 				return
 			}
 		}
@@ -250,7 +259,7 @@ func OnGroupMsg() {
 		}
 	}
 	cancel()
-	<-isFinished
+	<-finish
 	if len(aliveIps) > 0 {
 		send(aliveIps)
 	}
