@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/robfig/cron/v3"
-	"github.com/tatsushid/go-fastping"
 	"log"
 	"net"
 	"net/http"
@@ -16,6 +14,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/robfig/cron/v3"
+	"github.com/tatsushid/go-fastping"
 )
 
 var (
@@ -45,7 +46,7 @@ func main() {
 }
 
 var nmapCache struct {
-	ips []net.IP
+	ips map[string]struct{}
 	sync.Mutex
 }
 
@@ -57,7 +58,9 @@ func UpdateNmapList() {
 	}
 
 	nmapCache.Lock()
-	nmapCache.ips = ips
+	for _, ip := range ips {
+		nmapCache.ips[ip.String()] = struct{}{}
+	}
 	nmapCache.Unlock()
 }
 
@@ -219,7 +222,7 @@ func OnGroupMsg() {
 		}
 		return nil
 	}
-	send := func(ips []net.IP) {
+	send := func(ips []string) {
 		str := ping205.IpsString(ips)
 		if err := sendMsg(str); err != nil {
 			log.Printf("Cannot send message: [%s]%v", str, err)
@@ -227,25 +230,23 @@ func OnGroupMsg() {
 	}
 
 	// get ip list
-	var ips []net.IP
-	if *nmapAddr != "" {
-		nmapCache.Lock()
-		ips = nmapCache.ips
-		nmapCache.Unlock()
-	} else if ips, err = ping205.GetArpTable(); err != nil {
-		str := fmt.Sprintf("Get ip list error: %v\n", err)
-		if err := sendMsg(str); err != nil {
-			log.Printf("Cannot send message: [%s]%v", str, err)
-		}
-	}
-
 	pinger := fastping.NewPinger()
 	pinger.MaxRTT = time.Second * 10
-	for i := range ips {
-		pinger.AddIPAddr(&net.IPAddr{IP: ips[i]})
-	}
 
-	aliveIps := make([]net.IP, 0, len(ips))
+	nmapCache.Lock()
+	for ip := range nmapCache.ips {
+		if err := pinger.AddIP(ip); err != nil {
+			msg := fmt.Sprintf("Ping ip[%s] error: %v", ip, err)
+			if err := sendMsg(msg); err != nil {
+				log.Printf("Cannot send message: [%s]%v", msg, err)
+				nmapCache.Unlock()
+				return
+			}
+		}
+	}
+	nmapCache.Unlock()
+
+	var aliveIps []string
 	var mutAlv sync.Mutex
 	ctx, cancel := context.WithCancel(context.TODO())
 	finish := make(chan struct{})
@@ -270,7 +271,7 @@ func OnGroupMsg() {
 
 	pinger.OnRecv = func(addr *net.IPAddr, rtt time.Duration) {
 		mutAlv.Lock()
-		aliveIps = append(aliveIps, addr.IP)
+		aliveIps = append(aliveIps, addr.IP.String())
 		mutAlv.Unlock()
 	}
 

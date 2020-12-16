@@ -5,13 +5,13 @@ import (
 	"strings"
 )
 
-func IpsString(ips []net.IP) string {
+func IpsString(ips []string) string {
 	var sb strings.Builder
 	for _, ip := range ips {
 		sb.WriteString(" - ")
-		names, err := net.LookupAddr(ip.String())
+		names, err := net.LookupAddr(ip)
 		if err != nil {
-			sb.WriteString(ip.String() + "\n")
+			sb.WriteString(ip + "\n")
 		} else {
 			sb.WriteString(strings.Join(names, "|") + "\n")
 		}
