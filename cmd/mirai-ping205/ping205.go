@@ -33,6 +33,7 @@ var c = &http.Client{}
 
 func main() {
 	flag.Parse()
+	nmapCache.ips = make(map[string]struct{})
 
 	UpdateNmapList()
 	c := cron.New()
