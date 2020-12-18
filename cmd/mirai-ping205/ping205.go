@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -9,7 +8,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/url"
 	"ping205"
 	"strings"
 	"sync"
@@ -86,146 +84,30 @@ func HandleMirai(rw http.ResponseWriter, r *http.Request) {
 	}
 	if req.Sender.Group.ID == *GroupID &&
 		len(req.MessageChain) > 1 &&
-		req.MessageChain[1].Type == "Plain" &&
-		req.MessageChain[1].Text == "ping205" {
-		go OnGroupMsg()
+		req.MessageChain[1].Type == "Plain" {
+		go OnGroupMsg(strings.Fields(req.MessageChain[1].Text))
 	}
 }
 
-func GetSession() (string, error) {
-	link := url.URL{
-		Host: *host, Scheme: "http", Path: "auth",
+func OnGroupMsg(args []string) {
+	if len(args) < 1 || args[0] != "ping205" {
+		return
 	}
-	var resp struct {
-		Code    int    `json:"code"`
-		Session string `json:"session"`
-	}
-	if respJson, err := c.Post(
-		link.String(), "application/json",
-		strings.NewReader(`{"authKey":"`+*authKey+`"}`)); err != nil {
-		return "", fmt.Errorf("auth error: %w", err)
-	} else if err := json.NewDecoder(respJson.Body).Decode(&resp); err != nil {
-		return "", fmt.Errorf("decode auth response error: %w", err)
-	} else if resp.Code != 0 {
-		return "", fmt.Errorf("decode auth response status error: %d", resp.Code)
-	}
-	return resp.Session, nil
-}
+	force := len(args) < 2 || args[1] == "-f"
 
-func ReleaseSession(session string, qq int64) error {
-	link := url.URL{
-		Host: *host, Scheme: "http", Path: "release",
-	}
-	var resp struct {
-		Code    int    `json:"code"`
-		Session string `json:"session"`
-	}
-	if respJson, err := c.Post(
-		link.String(), "application/json",
-		strings.NewReader(fmt.Sprintf(`{"sessionKey": %q,"qq": %d}`, session, qq))); err != nil {
-		return fmt.Errorf("auth error: %w", err)
-	} else if err := json.NewDecoder(respJson.Body).Decode(&resp); err != nil {
-		return fmt.Errorf("decode auth response error: %w", err)
-	} else if resp.Code != 0 {
-		return fmt.Errorf("decode auth response status error: %d", resp.Code)
-	}
-	return nil
-}
-
-func BindQQ(session string, qq int64) error {
-	link := url.URL{
-		Host: *host, Scheme: "http", Path: "verify",
-	}
-	var resp struct {
-		Code int    `json:"code"`
-		Msg  string `json:"msg"`
-	}
-	if respJson, err := c.Post(
-		link.String(), "application/json",
-		strings.NewReader(fmt.Sprintf(`{"sessionKey": %q,"qq": %d}`, session, qq))); err != nil {
-		return fmt.Errorf("verify error: %w", err)
-	} else if err := json.NewDecoder(respJson.Body).Decode(&resp); err != nil {
-		return fmt.Errorf("decode verify response error: %w", err)
-	} else if resp.Code != 0 {
-		return fmt.Errorf("verify error: [%d]%s", resp.Code, resp.Msg)
-	}
-	if *DebugMode {
-		log.Printf("Verify success: [%d]%s", resp.Code, resp.Msg)
-	}
-	return nil
-}
-
-func SendGroupMsg(session, msg string) (int, error) {
-	var resp struct {
-		Code  int    `json:"code"`
-		Msg   string `json:"msg"`
-		MsgID int    `json:"messageId"`
-	}
-	link := url.URL{
-		Host: *host, Scheme: "http", Path: "sendGroupMessage",
-	}
-	var paylod = struct {
-		SessionKey   string `json:"sessionKey"`
-		Target       int64  `json:"target"`
-		MessageChain []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"messageChain"`
-	}{
-		SessionKey: session,
-		Target:     *GroupID,
-		MessageChain: []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		}{
-			{Type: "Plain", Text: msg},
-		},
-	}
-	var req *http.Request
-	if pl, err := json.Marshal(paylod); err != nil {
-		return 0, fmt.Errorf("marshal payload error: %w", err)
-	} else if req, err = http.NewRequest(http.MethodPost,
-		link.String(), bytes.NewReader(pl)); err != nil {
-		return 0, fmt.Errorf("make request error: %w", err)
-	} else {
-		req.Header.Add("User-Agent", "ping205-golang")
-		if *DebugMode {
-			log.Printf("Json payload: [%s]%s", link.String(), pl)
-		}
-		if respJson, err := c.Do(req); err != nil {
-			return 0, fmt.Errorf("send request error: %w", err)
-		} else if err := json.NewDecoder(respJson.Body).Decode(&resp); err != nil {
-			return 0, fmt.Errorf("decode verify response error: %w", err)
-		} else if resp.Code != 0 {
-			return 0, fmt.Errorf("send group message error: [%d]%s", resp.Code, resp.Msg)
-		}
-		return resp.MsgID, nil
-	}
-}
-
-func OnGroupMsg() {
-	session, err := GetSession()
+	session, err := NewSession(*authKey, *Id)
 	if err != nil {
-		log.Printf("Get session key error: %v", err)
+		log.Printf("Start session error: %v", err)
 		return
 	}
-
-	if err := BindQQ(session, *Id); err != nil {
-		log.Printf("Bind QQ error: %v", err)
-		return
-	}
-
-	sendMsg := func(msg string) error {
-		if msgID, err := SendGroupMsg(session, msg); err != nil {
-			return err
-		} else if *DebugMode {
-			fmt.Printf("Send message success: %d", msgID)
+	defer func() {
+		if err := session.Close(); err != nil {
+			log.Printf("Release session key error: %v", err)
 		}
-		return nil
-	}
+	}()
 	send := func(ips []string) {
 		str := ping205.IpsString(ips)
-		if err := sendMsg(str); err != nil {
+		if _, err := session.SendGroupMsg(str); err != nil {
 			log.Printf("Cannot send message: [%s]%v", str, err)
 		}
 	}
@@ -234,11 +116,15 @@ func OnGroupMsg() {
 	pinger := fastping.NewPinger()
 	pinger.MaxRTT = time.Second * 10
 
+	if force {
+		UpdateNmapList()
+	}
+
 	nmapCache.Lock()
 	for ip := range nmapCache.ips {
 		if err := pinger.AddIP(ip); err != nil {
 			msg := fmt.Sprintf("Ping ip[%s] error: %v", ip, err)
-			if err := sendMsg(msg); err != nil {
+			if _, err := session.SendGroupMsg(msg); err != nil {
 				log.Printf("Cannot send message: [%s]%v", msg, err)
 				nmapCache.Unlock()
 				return
@@ -278,7 +164,7 @@ func OnGroupMsg() {
 
 	if err := pinger.Run(); err != nil {
 		str := fmt.Sprintf("Ping error: %v", err)
-		if err := sendMsg(str); err != nil {
+		if _, err := session.SendGroupMsg(str); err != nil {
 			log.Printf("Cannot send message: [%s]%v", str, err)
 		}
 	}
@@ -292,9 +178,5 @@ func OnGroupMsg() {
 
 	if *DebugMode {
 		log.Printf("Ping finished")
-	}
-
-	if err := ReleaseSession(session, *Id); err != nil {
-		log.Fatalf("Release session key error: %v", err)
 	}
 }
